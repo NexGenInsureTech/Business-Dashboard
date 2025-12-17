@@ -1,0 +1,286 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Intermediary PDF Builder (HTML+CSS+JS)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{
+    --brand:#2f5597; --muted:#667; --bg:#f6f7fb; --card:#fff;
+  }
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial; margin:0; padding:24px; background:var(--bg);}
+  header h1{margin:0 0 4px;}
+  .muted{color:var(--muted);}
+  .card{background:var(--card); padding:16px; margin:16px 0; border-radius:8px; box-shadow:0 0 0 1px #eee;}
+  label{display:block; margin:8px 0;}
+  input[type="file"],input[type="text"],textarea,select{width:100%; padding:8px;}
+  button{padding:10px 16px; background:var(--brand); border:0; color:#fff; border-radius:6px; cursor:pointer;}
+  button:hover{background:#23457a;}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .options.grid{grid-template-columns:1fr 1fr 1fr;}
+  #letterPreview{background:#fff; padding:18px; border:1px solid #ddd; border-radius:8px;}
+</style>
+
+<!-- Client-side libraries (CDN) -->
+https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js</script>
+<script src="sdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js</script>
+https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js</script>
+https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js</script>
+https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js</script>
+https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js</script>
+</head>
+
+<body>
+<header>
+  <h1>Intermediary PDF Builder</h1>
+  <p class="muted">Upload monthly summary + master register → edit Letter → generate PDFs per Intermediary.</p>
+</header>
+
+<section class="card">
+  <h2>1) Upload Excel files</h2>
+  <label>Monthly Summary (table with columns: INTERMEDIARY, Apr-25 … Dec-25, Grand Total)
+    <input id="monthlyFile" type="file" accept=".xlsx,.xls,.csv" required>
+  </label>
+  <label>Master Register (SME_PR_MASTER_FY25-26.xlsx)
+    <input id="masterFile" type="file" accept=".xlsx,.xls" required>
+  </label>
+
+  <div class="grid">
+    <label>Monthly sheet name/index (optional)
+      <input id="monthlySheet" type="text" placeholder="e.g., Monthly or 0">
+    </label>
+    <label>Period Label (shown on PDFs)
+      <input id="periodLabel" type="text" placeholder="FY25–26 through Dec 2025">
+    </label>
+  </div>
+
+  <button id="btnParse">Validate & Parse</button>
+  <div id="parseResult" class="muted"></div>
+</section>
+
+<section class="card">
+  <h2>2) Letter page (fully editable)</h2>
+  <p class="muted">Supported placeholders: <code>{{PartnerName}}</code>, <code>{{Category}}</code>, <code>{{PeriodLabel}}</code>, <code>{{TotalGross}}</code></p>
+  <textarea id="letterText" rows="10"><b>Dear {{PartnerName}},</b><br/><br/>
+Thank you for being a Smartian and helping us build a sustainable, customer‑centric business with USGI.
+Your commitment to quality and responsible growth inspires our teams every day.<br/><br/>
+Below is your performance summary for <b>{{PeriodLabel}}</b>.<br/><br/>
+Warm regards,<br/>
+SME & Insurance Inclusion — USGI</textarea>
+
+  <div class="grid">
+    <label>Select a partner to preview
+      <select id="partnerSelect"></select>
+    </label>
+    <button id="btnPreview">Preview PDF (single partner)</button>
+  </div>
+
+  <div id="previewLink" class="muted"></div>
+
+  <!-- Hidden letter render container -->
+  <div id="letterPreview" style="position:absolute; left:-9999px; top:-9999px; width:550px;"></div>
+</section>
+
+<section class="card">
+  <h2>3) Generate PDFs</h2>
+  <div class="options grid">
+    <label><input id="includeLOB" type="checkbox" checked> Include LOB split</label>
+    <label><input id="includeProducts" type="checkbox" checked> Include Product mix (Intermediary & Channel)</label>
+    <label><input id="includeGeo" type="checkbox" checked> Include Geography (States & Branches)</label>
+  </div>
+  <button id="btnGenerate">Generate All PDFs (ZIP)</button>
+  <div id="generateStatus" class="muted"></div>
+</section>
+
+<footer class="muted">
+  <small>© USGI — SME & Insurance Inclusion</small>
+</footer>
+
+<script>
+(() => {
+  const MONTH_REGEX = /^[A-Za-z]{3}-\d{2}$/;
+  const monMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
+
+  let monthlyRows = [];          // array of row objects from monthly sheet
+  let masterRows  = [];          // array of row objects from master register
+  let monthCols   = [];          // e.g. ["Apr-25","May-25",...]
+  let partners    = [];          // partner names from monthly sheet
+  let catMap      = {};          // partner → category, from master
+  let periodLabel = "";          // used in PDFs
+
+  const parseResultEl = document.getElementById('parseResult');
+  const partnerSelect = document.getElementById('partnerSelect');
+
+  // ------------------------ Helpers ------------------------
+  const rupee = (x) => {
+    const v = Number(x || 0);
+    const ax = Math.abs(v);
+    if (ax >= 1e7)  return `₹${(v/1e7).toFixed(1)} Cr`;
+    if (ax >= 1e5)  return `₹${(v/1e5).toFixed(1)} L`;
+    return `₹${Math.round(v).toLocaleString()}`;
+  };
+
+  const isMonthCol = (c) => MONTH_REGEX.test(String(c).trim());
+  const tsOfMonth = (m) => {
+    const [abbr, yy] = m.split('-');
+    const y = Number('20'+yy);
+    const mon = monMap[abbr];
+    // jsPDF wants Date objects for chart label formatting; we’ll keep as strings for Chart.js
+    return new Date(y, mon-1, 1);
+  };
+
+  const readWorkbook = async (file, sheetArg) => {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
+    const sheetName = typeof sheetArg === 'string' && sheetArg !== ''
+      ? (isFinite(sheetArg) ? wb.SheetNames[Number(sheetArg)] : sheetArg)
+      : wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    return XLSX.utils.sheet_to_json(ws, {defval:null}); // array of row objects
+  };
+
+  const normalizeCols = (row) => {
+    // Trim keys
+    const out = {};
+    for (const k of Object.keys(row)) {
+      out[String(k).trim()] = row[k];
+    }
+    return out;
+  };
+
+  const numberize = (val) => {
+    if (val===null || val===undefined || val==='') return 0;
+    const n = Number(String(val).replace(/,/g,''));
+    return isFinite(n) ? n : 0;
+  };
+
+  const replacePlaceholders = (txt, ctx) => {
+    return txt
+      .replaceAll('{{PartnerName}}', ctx.partner)
+      .replaceAll('{{Category}}', ctx.category)
+      .replaceAll('{{PeriodLabel}}', ctx.period)
+      .replaceAll('{{TotalGross}}', rupee(ctx.totalGross));
+  };
+
+  // ------------------------ Parse files ------------------------
+  document.getElementById('btnParse').addEventListener('click', async () => {
+    try {
+      parseResultEl.textContent = 'Parsing…';
+      const monthlyFile = document.getElementById('monthlyFile').files[0];
+      const masterFile  = document.getElementById('masterFile').files[0];
+      const monthlySheet= document.getElementById('monthlySheet').value.trim();
+      periodLabel = document.getElementById('periodLabel').value.trim();
+
+      if (!monthlyFile || !masterFile) {
+        parseResultEl.textContent = 'Please upload both files.';
+        return;
+      }
+
+      monthlyRows = (await readWorkbook(monthlyFile, monthlySheet)).map(normalizeCols);
+      masterRows  = (await readWorkbook(masterFile, 0)).map(normalizeCols);
+
+      // Identify month columns in monthly sheet
+      monthCols = Object.keys(monthlyRows[0] || {}).filter(isMonthCol);
+      // Coerce numeric for month cols + Grand Total
+      monthlyRows = monthlyRows.map(r => {
+        monthCols.forEach(m => r[m] = numberize(r[m]));
+        if ('Grand Total' in r) r['Grand Total'] = numberize(r['Grand Total']);
+        r['INTERMEDIARY'] = String(r['INTERMEDIARY']||'').trim();
+        return r;
+      });
+
+      partners = monthlyRows.map(r => r['INTERMEDIARY']).filter(Boolean);
+
+      // Build category map from master
+      catMap = {};
+      masterRows.forEach(r => {
+        const name = String(r['INTERMEDIARY']||'').trim();
+        const cat  = String(r['INTERMEDIARY CATEGORY']||'').trim() || 'Others';
+        if (name) catMap[name] = cat;
+      });
+
+      // Default period label if blank
+      if (!periodLabel && monthCols.length) {
+        const last = monthCols.map(tsOfMonth).sort((a,b)=>a-b).pop();
+        periodLabel = last ? last.toLocaleString('en-GB', {month:'short', year:'numeric'}) : 'FY25–26';
+        document.getElementById('periodLabel').value = periodLabel;
+      }
+
+      // Populate partner dropdown
+      partnerSelect.innerHTML = '';
+      partners.slice(0, 1000).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        partnerSelect.appendChild(opt);
+      });
+
+      parseResultEl.textContent =
+        `Parsed ${partners.length} intermediaries. Months: ${monthCols.join(', ')}`;
+    } catch (e) {
+      console.error(e);
+      parseResultEl.textContent = 'Error: ' + e.message;
+    }
+  });
+
+  // ------------------------ PDF generation ------------------------
+  async function buildPdfForPartner(partner, cfg){
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'pt', format:'a4'}); // width ~595pt
+    const margin = 32;
+
+    const mRow = monthlyRows.find(r => r['INTERMEDIARY']===partner) || {};
+    const category = catMap[partner] || 'Others';
+    const totalGross = ('Grand Total' in mRow) ? mRow['Grand Total'] :
+      monthCols.reduce((s,m)=>s+numberize(mRow[m]),0);
+
+    // 1) Letter page (render HTML via html2canvas)
+    const letter = replacePlaceholders(cfg.letterHTML, {
+      partner, category, period:periodLabel, totalGross
+    });
+    const container = document.getElementById('letterPreview');
+    container.innerHTML = letter;
+    const canvas = await html2canvas(container, {scale:2});
+    const imgData = canvas.toDataURL('image/png');
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const imgW = pageW - margin*2;
+    const imgH = imgW * (canvas.height/canvas.width);
+    doc.addImage(imgData, 'PNG', margin, margin, imgW, imgH);
+    doc.addPage();
+
+    // 2) KPIs + MoM chart + Mix
+    // KPIs
+    const kpis = [
+      ['Gross Premium (sum)', rupee(totalGross)],
+      ['Net Premium', rupee(sumCol('NET PREMIUM', partner))],
+      ['Policies (unique)', String(uniquePolicies(partner))],
+      ['GST Collected', rupee(sumCol('Total Gst', partner))],
+      ['Commission Amount', rupee(sumCol('COMMISSION AMOUNT', partner))],
+      ['Sum Insured', rupee(sumInsured(partner))]
+    ];
+    doc.setFontSize(16); doc.setTextColor(0,0,0);
+    doc.text(`Performance Summary — ${partner} (${category})`, margin, margin+4);
+    doc.setFontSize(11);
+    doc.text(`Period: ${periodLabel}`, margin, margin+20);
+
+    doc.autoTable({
+      head:[['Metric','Value']],
+      body:kpis,
+      startY: margin+34,
+      theme:'grid',
+      styles:{fontSize:9},
+      headStyles:{fillColor:[232,240,254]},
+      columnStyles:{0:{cellWidth:240},1:{cellWidth:240}}
+    });
+
+    let cursorY = doc.lastAutoTable.finalY + 10;
+
+    // MoM chart
+    const labels = monthCols.map(m => m);
+    const data = monthCols.map(m => numberize(mRow[m]));
+    const chartCanvas = document.createElement('canvas');
+    chartCanvas.width = 680; chartCanvas.height = 300;
+    document.body.appendChild(chartCanvas);
+    const chart = new Chart(chartCanvas.getContext('2d'), {
+      type:'bar',
