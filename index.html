@@ -6,19 +6,11 @@
   <title>Intermediary PDF Builder (HTML+CSS+JS)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
 
-  <!-- Local Bulma CSS + your app styles -->
+<!-- Local Bulma CSS -->
   <link rel="stylesheet" href="assets/css/app.css">
   <link rel="stylesheet" href="assets/css/bulma.min.css">
 
-<!-- Local JS libraries -->
-  <script src="assets/js/xlsx.full.min.js"></script>
-  <script src="assets/js/chart.umd.min.js"></script>
-  <script src="assets/js/html2canvas.min.js"></script>
-  <script src="assets/js/jspdf.plugin.autotable.min.js"></script>
-  <script src="assets/js/jspdf.umd.min.js"></script>
-  <script src="assets/js/jszip.min.js"></script>
-
-
+  
 </head>
 
 <body>
@@ -29,19 +21,19 @@
 
 <section class="card">
   <h2>1) Upload Excel files</h2>
-  <label>Monthly Summary (columns: INTERMEDIARY / Intermediary Name, Jan-25 … Dec-25 OR 01/01/2025 … 12/01/2025, optional Grand Total)
+  <label>Monthly Summary (columns: INTERMEDIARY, Apr-25 … Dec-25, Grand Total)
     <input id="monthlyFile" type="file" accept=".xlsx,.xls,.csv" required>
   </label>
-  <label>Master Register (SME_PR_MASTER_FY25-26.xlsx or similar)
+  <label>Master Register (SME_PR_MASTER_FY25-26.xlsx)
     <input id="masterFile" type="file" accept=".xlsx,.xls" required>
   </label>
 
   <div class="grid">
     <label>Monthly sheet name/index (optional)
-      <input id="monthlySheet" type="text" placeholder="e.g., Sheet1 or 0">
+      <input id="monthlySheet" type="text" placeholder="e.g., Monthly or 0">
     </label>
     <label>Period Label (shown on PDFs)
-      <input id="periodLabel" type="text" placeholder="FY25–26 through Feb 2025">
+      <input id="periodLabel" type="text" placeholder="FY25–26 through Dec 2025">
     </label>
   </div>
 
@@ -91,7 +83,7 @@ SME & Insurance Inclusion — USGI</textarea>
   <small>© USGI — SME & Insurance Inclusion</small>
 </footer>
 
-<!-- Local JS libraries (ORDER MATTERS: jsPDF BEFORE AutoTable) -->
+<!-- Local JS libraries -->
   <script src="assets/js/xlsx.full.min.js"></script>
   <script src="assets/js/chart.umd.min.js"></script>
   <script src="assets/js/html2canvas.min.js"></script>
@@ -99,58 +91,31 @@ SME & Insurance Inclusion — USGI</textarea>
   <script src="assets/js/jspdf.umd.min.js"></script>
   <script src="assets/js/jszip.min.js"></script>
 
-<!-- App Code (after libraries) -->
 
 <!-- App Code (after libraries) -->
 <script>
-window.addEventListener('DOMContentLoaded', () => {
-  // ---------- Preflight ----------
-  console.log('Preflight:', {
-    XLSX: !!window.XLSX, XLSXver: window.XLSX && window.XLSX.version,
-    jsPDF: !!(window.jspdf && window.jspdf.jsPDF),
-    autoTable: !!(window.jspdf && window.jspdf.autoTable),
-    Chart: !!window.Chart, JSZip: !!window.JSZip, html2canvas: !!window.html2canvas
-  });
-
-  // ---------- Guard: libs must be loaded ----------
-  const libsOk =
-    !!window.XLSX &&
-    !!(window.jspdf && window.jspdf.jsPDF) &&
-    !!window.jspdf.autoTable &&
-    !!window.Chart &&
-    !!window.JSZip &&
-    !!window.html2canvas;
-
-  if (!libsOk){
-    console.error('Libraries missing:', {
-      XLSX: !!window.XLSX,
-      jsPDF: !!(window.jspdf && window.jspdf.jsPDF),
-      autoTable: !!(window.jspdf && window.jspdf.autoTable),
-      Chart: !!window.Chart,
-      JSZip: !!window.JSZip,
-      html2canvas: !!window.html2canvas
-    });
+(function(){
+  // Bind UMD globals safely
+  const XLSXLoaded = !!window.XLSX;
+  const jsPDFLoaded = !!(window.jspdf && window.jspdf.jsPDF);
+  if (!XLSXLoaded || !jsPDFLoaded){
     alert('Error: Required libraries did not load. Check asset paths and script order.');
+    console.error('XLSX:', XLSXLoaded, 'jsPDF:', jsPDFLoaded);
     return;
   }
-
-  // ---------- Constants & state ----------
   const { jsPDF } = window.jspdf;
-  const autoTable = window.jspdf.autoTable; // jsPDF AutoTable v3
   const MONTH_REGEX = /^[A-Za-z]{3}-\d{2}$/;
-  const monNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const monMap   = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
+  const monMap = {Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
 
-  let monthlyRows = [];    // normalized rows from monthly sheet
+  let monthlyRows = [];    // rows from monthly sheet
   let masterRows  = [];    // rows from master register
-  let monthCols   = [];    // normalized month labels (MMM-YY), sorted
-  let partners    = [];    // unique partner names
+  let monthCols   = [];    // ["Apr-25","May-25",...]
+  let partners    = [];    // partner names
   let catMap      = {};    // partner -> category
   let periodLabel = "";    // display label for PDFs
 
   const parseResultEl = document.getElementById('parseResult');
   const partnerSelect = document.getElementById('partnerSelect');
-  const btnParse      = document.getElementById('btnParse');
 
   // ---------- Helpers ----------
   const rupee = (x) => {
@@ -159,88 +124,44 @@ window.addEventListener('DOMContentLoaded', () => {
     if (ax >= 1e5)  return `₹${(v/1e5).toFixed(1)} L`;
     return `₹${Math.round(v).toLocaleString()}`;
   };
-
-  function monLabelToDate(lbl){
-    if (!MONTH_REGEX.test(lbl)) return null;
-    const [m, yy] = lbl.split('-');
-    const year = 2000 + Number(yy);
-    const month = monMap[m] - 1;
-    return new Date(year, month, 1);
-  }
-
-  function looksLikeDateHeader(h){
-    const s = String(h).trim();
-    return /^\d{1,2}[\/-]\d{1,2}[\/-]\d{4}$/.test(s) || /^\d{4}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(s);
-  }
-
-  function normalizeMonthHeader(h){
-    // 01/01/2025 or 2025-01-01 -> "Jan-25" | already "Jan-25" stays as-is
-    const s = String(h).trim();
-    let y, m;
-    if (/^\d{1,2}[\/-]\d{1,2}[\/-]\d{4}$/.test(s)){
-      const [a,b,c] = s.split(/[\/-]/).map(Number);
-      m = (a>12 ? b : a); y = c;
-    } else if (/^\d{4}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(s)){
-      const [c,a,b] = s.split(/[\/-]/).map(Number);
-      y = c; m = a;
-    } else {
-      if (MONTH_REGEX.test(s)) return s;
-      return s; // unknown, leave as-is
-    }
-    const mon = monNames[Math.max(1,Math.min(12,m)) - 1];
-    return `${mon}-${String(y).slice(-2)}`;
-  }
-
-  function numberize(val){
+  const isMonthCol = (c) => MONTH_REGEX.test(String(c).trim());
+  const tsOfMonth = (m) => {
+    const [abbr, yy] = m.split('-');
+    const y = Number('20'+yy);
+    const mon = monMap[abbr];
+    return new Date(y, mon-1, 1);
+  };
+  const numberize = (val) => {
     if (val===null || val===undefined || val==='') return 0;
     const n = Number(String(val).replace(/,/g,''));
     return isFinite(n) ? n : 0;
-  }
-
-  function normalizeCols(row){
+  };
+  const normalizeCols = (row) => {
     const out = {};
     for (const k of Object.keys(row)) out[String(k).trim()] = row[k];
     return out;
-  }
+  };
+  const replacePlaceholders = (txt, ctx) => (
+    txt.replaceAll('{{PartnerName}}', ctx.partner)
+       .replaceAll('{{Category}}', ctx.category)
+       .replaceAll('{{PeriodLabel}}', ctx.period)
+       .replaceAll('{{TotalGross}}', rupee(ctx.totalGross))
+  );
 
-  async function readWorkbook(file, sheetArg){
-    // Robust CSV + XLSX handling
-    const ext = (file.name||'').split('.').pop().toLowerCase();
-    let wb;
-    if (ext === 'csv'){
-      const text = await file.text();
-      wb = XLSX.read(text, {type:'string'});
-    } else {
-      const buf = await file.arrayBuffer();
-      wb = XLSX.read(buf, {type:'array'});
-    }
+  const readWorkbook = async (file, sheetArg) => {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
     const sheetName = (typeof sheetArg === 'string' && sheetArg !== '')
       ? (isFinite(sheetArg) ? wb.SheetNames[Number(sheetArg)] : sheetArg)
       : wb.SheetNames[0];
     const ws = wb.Sheets[sheetName];
-    if (!ws) throw new Error(`Sheet "${sheetName}" not found. Available: ${wb.SheetNames.join(', ')}`);
     return XLSX.utils.sheet_to_json(ws, {defval:null});
-  }
-
-  function findIntermediaryColumn(rows){
-    if (!rows.length) return null;
-    const headers = Object.keys(rows[0]);
-    const candidates = [
-      'INTERMEDIARY','Intermediary','Intermediary Name','Partner','Agent','Broker'
-    ];
-    for (const c of candidates){
-      const h = headers.find(h => h.trim().toLowerCase() === c.trim().toLowerCase());
-      if (h) return h;
-    }
-    return null;
-  }
+  };
 
   // ---------- Validate & Parse ----------
-  btnParse.addEventListener('click', async () => {
+  document.getElementById('btnParse').addEventListener('click', async () => {
     try {
-      btnParse.disabled = true;
       parseResultEl.textContent = 'Parsing…';
-
       const monthlyFile = document.getElementById('monthlyFile').files[0];
       const masterFile  = document.getElementById('masterFile').files[0];
       const monthlySheet= document.getElementById('monthlySheet').value.trim();
@@ -248,76 +169,26 @@ window.addEventListener('DOMContentLoaded', () => {
 
       if (!monthlyFile || !masterFile) {
         parseResultEl.textContent = 'Please upload both files.';
-        btnParse.disabled = false;
         return;
       }
 
-      // Read files with detailed error handling
-      let mRaw, masterRaw;
-      try {
-        mRaw = (await readWorkbook(monthlyFile, monthlySheet)).map(normalizeCols);
-      } catch (err) {
-        console.error('Monthly read failed:', err);
-        parseResultEl.textContent = `Monthly file error: ${err.message}`;
-        btnParse.disabled = false;
-        return;
-      }
-      try {
-        masterRaw = (await readWorkbook(masterFile, 0)).map(normalizeCols);
-      } catch (err) {
-        console.error('Master read failed:', err);
-        parseResultEl.textContent = `Master file error: ${err.message}`;
-        btnParse.disabled = false;
-        return;
-      }
+      monthlyRows = (await readWorkbook(monthlyFile, monthlySheet)).map(normalizeCols);
+      masterRows  = (await readWorkbook(masterFile, 0)).map(normalizeCols);
 
-      if (!mRaw.length){
-        parseResultEl.textContent = 'Monthly sheet returned 0 rows. Check the sheet name/index.';
-        btnParse.disabled = false;
-        return;
-      }
+      // Identify month columns in monthly sheet
+      monthCols = Object.keys(monthlyRows[0] || {}).filter(isMonthCol);
 
-      // Identify month-like headers in the monthly sheet
-      const rawMonthCols = Object.keys(mRaw[0]).filter(h => MONTH_REGEX.test(h) || looksLikeDateHeader(h));
-      const headerMap = {}; // original header -> normalized "MMM-YY"
-      rawMonthCols.forEach(h => headerMap[h] = normalizeMonthHeader(h));
-
-      // Normalize monthly rows: convert month headers to "MMM-YY" keys; numberize
-      monthlyRows = mRaw.map(row => {
-        const out = {};
-        for (const k of Object.keys(row)){
-          if (MONTH_REGEX.test(k) || looksLikeDateHeader(k)){
-            const norm = headerMap[k];
-            out[norm] = numberize(row[k]);
-          } else {
-            out[k] = row[k];
-          }
-        }
-        if ('Grand Total' in out) out['Grand Total'] = numberize(out['Grand Total']);
-        return out;
+      // Coerce numeric + normalize intermediary names
+      monthlyRows = monthlyRows.map(r => {
+        monthCols.forEach(m => r[m] = numberize(r[m]));
+        if ('Grand Total' in r) r['Grand Total'] = numberize(r['Grand Total']);
+        r['INTERMEDIARY'] = String(r['INTERMEDIARY']||'').trim();
+        return r;
       });
 
-      // Determine normalized monthCols list and sort
-      monthCols = Array.from(
-        new Set(
-          Object.keys(monthlyRows[0]).filter(k => MONTH_REGEX.test(k))
-        )
-      );
-      monthCols.sort((a,b) => monLabelToDate(a) - monLabelToDate(b));
+      partners = monthlyRows.map(r => r['INTERMEDIARY']).filter(Boolean);
 
-      // Determine intermediary column & unique partners
-      const intermCol = findIntermediaryColumn(monthlyRows);
-      if (!intermCol){
-        parseResultEl.textContent = 'Could not locate an Intermediary column (looked for: INTERMEDIARY, Intermediary Name, Partner, Agent, Broker).';
-        btnParse.disabled = false;
-        return;
-      }
-      monthlyRows = monthlyRows.map(r => { r[intermCol] = String(r[intermCol]||'').trim(); return r; });
-      partners = Array.from(new Set(monthlyRows.map(r => r[intermCol]).filter(Boolean)));
-      partnerSelect.dataset.intermCol = intermCol;
-
-      // Master register & category map
-      masterRows = masterRaw;
+      // Build category map from master
       catMap = {};
       masterRows.forEach(r => {
         const name = String(r['INTERMEDIARY']||'').trim();
@@ -325,30 +196,26 @@ window.addEventListener('DOMContentLoaded', () => {
         if (name) catMap[name] = cat;
       });
 
-      // Default period label if blank (use last detected month)
+      // Default period label if blank
       if (!periodLabel && monthCols.length) {
-        const lastDate = monLabelToDate(monthCols[monthCols.length - 1]);
-        periodLabel = lastDate
-          ? lastDate.toLocaleString('en-GB', {month:'short', year:'numeric'})
-          : 'FY25–26';
+        const last = monthCols.map(tsOfMonth).sort((a,b)=>a-b).pop();
+        periodLabel = last ? last.toLocaleString('en-GB', {month:'short', year:'numeric'}) : 'FY25–26';
         document.getElementById('periodLabel').value = periodLabel;
       }
 
       // Populate partner dropdown
       partnerSelect.innerHTML = '';
-      partners.slice(0, 2000).forEach(p => {
+      partners.slice(0, 1000).forEach(p => {
         const opt = document.createElement('option');
         opt.value = p; opt.textContent = p;
         partnerSelect.appendChild(opt);
       });
 
-      const monthsLabel = monthCols.length ? monthCols.join(', ') : '(none found)';
-      parseResultEl.textContent = `Parsed ${partners.length} intermediaries. Months: ${monthsLabel}`;
+      parseResultEl.textContent =
+        `Parsed ${partners.length} intermediaries. Months: ${monthCols.join(', ')}`;
     } catch (e) {
       console.error(e);
       parseResultEl.textContent = 'Error: ' + e.message;
-    } finally {
-      btnParse.disabled = false;
     }
   });
 
@@ -415,22 +282,23 @@ window.addEventListener('DOMContentLoaded', () => {
     const doc = new jsPDF({unit:'pt', format:'a4'});
     const margin = 32;
 
-    const intermCol = partnerSelect.dataset.intermCol || 'INTERMEDIARY';
-    const mRow = monthlyRows.find(r => r[intermCol]===partner) || {};
+    const mRow = monthlyRows.find(r => r['INTERMEDIARY']===partner) || {};
     const category = catMap[partner] || 'Others';
+    const totalGross = ('Grand Total' in mRow) ? mRow['Grand Total'] :
+      monthCols.reduce((s,m)=>s+numberize(mRow[m]),0);
 
-    // Compute total gross
-    let totalGross = 0;
-    if ('Grand Total' in mRow) totalGross = numberize(mRow['Grand Total']);
-    else if (monthCols.length) totalGross = monthCols.reduce((s,m)=> s + numberize(mRow[m]), 0);
+    // (Optional) Draw brand header band + logo on each page
+    // function drawHeaderBand(doc){
+    //   const pageW = doc.internal.pageSize.getWidth();
+    //   doc.setFillColor(47,85,151);  // USGI blue
+    //   doc.rect(0, 0, pageW, 40, 'F');
+    //   // doc.addImage('assets/img/usgi-logo.png', 'PNG', 16, 8, 80, 24);
+    // }
 
     // ---- Page 1: Letter (rendered via html2canvas) ----
-    const letter = (cfg.letterHTML || '')
-      .replaceAll('{{PartnerName}}', partner)
-      .replaceAll('{{Category}}', category)
-      .replaceAll('{{PeriodLabel}}', periodLabel || '')
-      .replaceAll('{{TotalGross}}', rupee(totalGross || 0));
-
+    const letter = replacePlaceholders(cfg.letterHTML, {
+      partner, category, period:periodLabel, totalGross
+    });
     const container = document.getElementById('letterPreview');
     container.innerHTML = letter;
     const canvas = await html2canvas(container, {scale:2});
@@ -438,6 +306,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const pageW = doc.internal.pageSize.getWidth();
     const imgW = pageW - margin*2;
     const imgH = imgW * (canvas.height/canvas.width);
+    // drawHeaderBand(doc);
     doc.addImage(imgData, 'PNG', margin, margin, imgW, imgH);
     doc.addPage();
 
@@ -450,13 +319,13 @@ window.addEventListener('DOMContentLoaded', () => {
       ['Commission Amount', rupee(sumCol('COMMISSION AMOUNT', partner))],
       ['Sum Insured', rupee(sumInsured(partner))]
     ];
-
+    // drawHeaderBand(doc);
     doc.setFontSize(16);
     doc.text(`Performance Summary — ${partner} (${category})`, margin, margin+18);
     doc.setFontSize(11);
-    doc.text(`Period: ${periodLabel || ''}`, margin, margin+34);
+    doc.text(`Period: ${periodLabel}`, margin, margin+34);
 
-    autoTable(doc, {
+    doc.autoTable({
       head:[['Metric','Value']],
       body:kpis,
       startY: margin+48,
@@ -468,34 +337,29 @@ window.addEventListener('DOMContentLoaded', () => {
 
     let cursorY = doc.lastAutoTable.finalY + 10;
 
-    // Month-on-Month chart (skip if no months)
-    if (monthCols.length){
-      const labels = monthCols.slice();
-      const data = monthCols.map(m => numberize(mRow[m]));
-      const chartCanvas = document.createElement('canvas');
-      chartCanvas.width = 680; chartCanvas.height = 300;
-      document.body.appendChild(chartCanvas);
-      const chart = new Chart(chartCanvas.getContext('2d'), {
-        type:'bar',
-        data:{labels, datasets:[{label:'Gross Premium', data, backgroundColor:'#2f5597'}]},
-        options:{responsive:false, scales:{y:{ticks:{callback:(v)=>rupee(v)}}}}
-      });
-      await new Promise(r => setTimeout(r, 200)); // allow chart to render
-      const chartImg = chartCanvas.toDataURL('image/png');
-      document.body.removeChild(chartCanvas);
-      const pageW2 = doc.internal.pageSize.getWidth();
-      doc.addImage(chartImg, 'PNG', margin, cursorY, pageW2 - margin*2, 160);
-      cursorY += 170;
-    } else {
-      doc.setFontSize(11);
-      doc.text('No month-wise data found in Monthly Summary (chart skipped).', margin, cursorY);
-      cursorY += 20;
-    }
+    // Month-on-Month chart from monthly columns
+    const labels = monthCols.slice();
+    const data = monthCols.map(m => numberize(mRow[m]));
+    const chartCanvas = document.createElement('canvas');
+    chartCanvas.width = 680; chartCanvas.height = 300;
+    document.body.appendChild(chartCanvas);
+    const chart = new Chart(chartCanvas.getContext('2d'), {
+      type:'bar',
+      data:{labels, datasets:[{label:'Gross Premium', data, backgroundColor:'#2f5597'}]},
+      options:{responsive:false, scales:{y:{ticks:{callback:(v)=>rupee(v)}}}}
+    });
+    await new Promise(r => setTimeout(r, 200)); // allow chart to render
+    const chartImg = chartCanvas.toDataURL('image/png');
+    document.body.removeChild(chartCanvas);
+    const pageW2 = doc.internal.pageSize.getWidth();
+    doc.addImage(chartImg, 'PNG', margin, cursorY, pageW2 - margin*2, 160);
+    cursorY += 170;
 
+    // Product & LOB mixes
     if (cfg.includeProducts){
       doc.setFontSize(12);
       doc.text('Product Mix — Intermediary', margin, cursorY);
-      autoTable(doc, {
+      doc.autoTable({
         head:[['Product','Gross Premium']],
         body: topSeries(groupSum('PRODUCT NAME','GROSS PREMIUM', partner), 8),
         startY: cursorY+6, theme:'grid', styles:{fontSize:9},
@@ -504,7 +368,7 @@ window.addEventListener('DOMContentLoaded', () => {
       cursorY = doc.lastAutoTable.finalY + 10;
 
       doc.text(`Product Mix — Channel (${category})`, margin, cursorY);
-      autoTable(doc, {
+      doc.autoTable({
         head:[['Product','Gross Premium']],
         body: topSeries(groupSumCategory('PRODUCT NAME','GROSS PREMIUM', category), 8),
         startY: cursorY+6, theme:'grid', styles:{fontSize:9},
@@ -515,7 +379,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
     if (cfg.includeLOB){
       doc.text('Line of Business Split — Intermediary', margin, cursorY);
-      autoTable(doc, {
+      doc.autoTable({
         head:[['LOB','Gross Premium']],
         body: topSeries(groupSum('LINE OF BUSINESS','GROSS PREMIUM', partner), 6),
         startY: cursorY+6, theme:'grid', styles:{fontSize:9},
@@ -533,12 +397,13 @@ window.addEventListener('DOMContentLoaded', () => {
     // ---- Page 3: Geography ----
     if (cfg.includeGeo){
       doc.addPage();
+      // drawHeaderBand(doc);
       doc.setFontSize(16);
       doc.text(`Geography — ${partner}`, margin, margin+18);
 
       doc.setFontSize(12);
       doc.text('Top States', margin, margin+38);
-      autoTable(doc, {
+      doc.autoTable({
         head:[['State','Gross Premium']],
         body: topSeries(groupSum('STATE','GROSS PREMIUM', partner), 10),
         startY: margin+44, theme:'grid', styles:{fontSize:9},
@@ -547,7 +412,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
       let y2 = doc.lastAutoTable.finalY + 10;
       doc.text('Top Branches', margin, y2);
-      autoTable(doc, {
+      doc.autoTable({
         head:[['Branch','Gross Premium']],
         body: topSeries(groupSum('BRANCH NAME','GROSS PREMIUM', partner), 10),
         startY: y2+6, theme:'grid', styles:{fontSize:9},
@@ -574,7 +439,6 @@ window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('previewLink').innerHTML =
         `Preview: ${url}Open PDF</a>`;
     } catch (e) {
-      console.error(e);
       document.getElementById('previewLink').textContent = 'Error: '+e.message;
     }
   });
@@ -612,15 +476,10 @@ window.addEventListener('DOMContentLoaded', () => {
       a.click();
       statusEl.textContent = `Done — generated ${done} PDFs. ZIP downloaded.`;
     } catch (e) {
-      console.error(e);
       document.getElementById('generateStatus').textContent = 'Error: '+e.message;
     }
   });
-});
+})();
 </script>
-``
-
-
-  
 </body>
 </html>
